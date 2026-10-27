@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { Panel } from "@/components/ui/Panel";
 import { formatEta } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
+import { VoiceAlertButton } from "@/components/ui/VoiceAlertButton";
 
 interface RiskPanelProps {
   risks: RiskAssessment[];
@@ -156,6 +157,16 @@ export function RiskPanel({ risks, onSelect, onExplain }: RiskPanelProps) {
                   </div>
                 )}
 
+                {/* Vernacular Voice Alert */}
+                <VoiceAlertButton
+                  riskLevel={risk.risk_level}
+                  cellId={risk.cell_id}
+                  etaMinutes={risk.eta_minutes}
+                  thunderstormProb={risk.thunderstorm_probability}
+                  lightningProb={risk.lightning_probability}
+                  speedKmh={risk.speed_kmh}
+                  className="mt-2"
+                />
 
               </div>
             </div>

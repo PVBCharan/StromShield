@@ -1,8 +1,9 @@
 """
-SIH26072 — Deep Neural Nowcaster Inference Engine v3
+SIH26072 — Deep Neural Nowcaster Inference Engine v4 (Physics-Guided)
 Loads PyTorch StormNowcasterMLP v3 weights and provides high-accuracy ML forecasts
-using Monte Carlo Dropout ensemble averaging with optical flow fusion for stable,
-non-linear trajectory predictions.
+using Monte Carlo Dropout ensemble averaging, optical flow fusion, and a
+physics-guided trajectory clamp that blends ML predictions with velocity-based
+linear extrapolation to eliminate short-term position drift.
 """
 
 import os
@@ -122,39 +123,60 @@ class StormMLInference:
         curr_y = cell["centroid_y"]
         curr_x = cell["centroid_x"]
 
+        # --- Physics baseline: linear extrapolation from smoothed velocity ---
+        vx = cell.get("velocity_x", 0.6)
+        vy = cell.get("velocity_y", -0.3)
+        time_step = settings.mvp_time_step_minutes
+
         forecasts = []
         trajectory_coords = [[float(cell["center_lon"]), float(cell["center_lat"])]]
 
         for idx, h in enumerate(horizons_minutes):
-            dx, dy = float(traj_offsets[idx][0]), float(traj_offsets[idx][1])
+            # --- ML raw prediction ---
+            dx_ml, dy_ml = float(traj_offsets[idx][0]), float(traj_offsets[idx][1])
+            ml_pred_y = float(curr_y) + dy_ml
+            ml_pred_x = float(curr_x) + dx_ml
 
-            pred_y = float(curr_y) + dy
-            pred_x = float(curr_x) + dx
+            ml_pred_lat = float(center_lat + (ml_pred_y - grid_h / 2) * (resolution_km / 111.0))
+            cos_lat_ml = np.cos(np.radians(ml_pred_lat))
+            ml_pred_lon = float(center_lon + (ml_pred_x - grid_w / 2) * (resolution_km / (111.0 * max(0.5, cos_lat_ml))))
 
-            # Convert grid to lat/lon with cos(lat) correction
-            pred_lat = float(center_lat + (pred_y - grid_h / 2) * (resolution_km / 111.0))
-            cos_lat = np.cos(np.radians(pred_lat))
-            pred_lon = float(center_lon + (pred_x - grid_w / 2) * (resolution_km / (111.0 * max(0.5, cos_lat))))
+            # --- Physics baseline: smoothed-velocity linear extrapolation ---
+            steps = h / float(time_step)
+            phys_pred_y = float(curr_y) + vy * steps
+            phys_pred_x = float(curr_x) + vx * steps
 
-            # --- Optical Flow Fusion ---
+            phys_pred_lat = float(center_lat + (phys_pred_y - grid_h / 2) * (resolution_km / 111.0))
+            cos_lat_phys = np.cos(np.radians(phys_pred_lat))
+            phys_pred_lon = float(center_lon + (phys_pred_x - grid_w / 2) * (resolution_km / (111.0 * max(0.5, cos_lat_phys))))
+
+            # --- Physics-Guided Gating ---
+            # w_ml ramps from 0.05 (short-term, physics dominates) to 0.50 (long-term, ML contributes)
+            # Formula: w_ml = 0.05 + 0.45 * (h / 60)^1.5  — convex ramp favoring physics
+            w_ml = 0.05 + 0.45 * ((h / 60.0) ** 1.5)
+            w_phys = 1.0 - w_ml
+
+            pred_lat = w_phys * phys_pred_lat + w_ml * ml_pred_lat
+            pred_lon = w_phys * phys_pred_lon + w_ml * ml_pred_lon
+
+            # --- Optical Flow Fusion (further refine if available) ---
             if optical_flow_trajectory and idx < len(optical_flow_trajectory):
                 of_point = optical_flow_trajectory[idx]
                 of_lat = of_point.get("lat", pred_lat)
                 of_lon = of_point.get("lon", pred_lon)
 
-                # Fusion weights: short-term favors optical flow, long-term favors ML
+                # OF fusion: short-term trusts OF heavily, long-term less
                 if h <= 15:
-                    of_weight = 0.70
+                    of_weight = 0.50
                 elif h <= 30:
-                    of_weight = 0.55
+                    of_weight = 0.35
                 elif h <= 45:
-                    of_weight = 0.40
+                    of_weight = 0.20
                 else:
-                    of_weight = 0.30
+                    of_weight = 0.10
 
-                ml_weight = 1.0 - of_weight
-                pred_lat = of_weight * of_lat + ml_weight * pred_lat
-                pred_lon = of_weight * of_lon + ml_weight * pred_lon
+                pred_lat = of_weight * of_lat + (1.0 - of_weight) * pred_lat
+                pred_lon = of_weight * of_lon + (1.0 - of_weight) * pred_lon
 
             # Clamp to Gujarat bounding box
             pred_lat = float(np.clip(pred_lat, settings.gujarat_lat_min, settings.gujarat_lat_max))
@@ -182,12 +204,14 @@ class StormMLInference:
                 "thunderstorm_probability": round(ts_prob, 2),
                 "lightning_probability": round(lt_prob, 2),
                 "confidence_score": round(confidence, 2),
+                "physics_weight": round(w_phys, 2),
+                "ml_weight": round(w_ml, 2),
             })
 
             trajectory_coords.append([round(pred_lon, precision), round(pred_lat, precision)])
 
         return {
-            "smoothing_model": "PyTorch-DeepNowcaster-v3-MCDropout-OpticalFlow",
+            "smoothing_model": "PyTorch-DeepNowcaster-v4-PhysicsGuided-MCDropout",
             "forecasts": forecasts,
             "trajectory_coords": trajectory_coords,
         }

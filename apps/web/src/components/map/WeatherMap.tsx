@@ -5,7 +5,7 @@ import * as maplibregl from "maplibre-gl";
 import { StormUpdatePayload } from "@/lib/types";
 import { createStormMarkerElement, updateStormMarkerDbz, updateStormMarkerSelection } from "@/components/map/StormMarker";
 import { cn, formatEta } from "@/lib/utils";
-import { Layers, Radar, Route, Cloud, Globe, Map as MapIcon, ChevronUp, ChevronDown, X } from "lucide-react";
+import { Layers, Radar, Route, Cloud, Globe, Map as MapIcon, ChevronUp, ChevronDown, X, CloudRain } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface WeatherMapProps {
@@ -95,6 +95,8 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
   const [showTrajectoryLayer, setShowTrajectoryLayer] = useState(true);
   const [showAssetLayer, setShowAssetLayer] = useState(showInfrastructure);
   const [isLayerMenuOpen, setIsLayerMenuOpen] = useState(false);
+  const [showRainViewerLayer, setShowRainViewerLayer] = useState(true);
+  const rainviewerTimestampRef = useRef<string | null>(null);
 
   useEffect(() => {
     setShowAssetLayer(Boolean(showInfrastructure));
@@ -115,6 +117,14 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
       }
     });
   }, [showRadarLayer]);
+
+  // Toggle RainViewer live radar layer visibility
+  useEffect(() => {
+    if (!map.current) return;
+    if (map.current.getLayer("rainviewer-radar-layer")) {
+      map.current.setLayoutProperty("rainviewer-radar-layer", "visibility", showRainViewerLayer ? "visible" : "none");
+    }
+  }, [showRainViewerLayer]);
 
   useEffect(() => {
     if (!map.current) return;
@@ -231,6 +241,70 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
 
     map.current = instance;
 
+    // --- RainViewer Live Radar Tiles ---
+    const loadRainViewer = async () => {
+      try {
+        const resp = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const radarFrames = data?.radar?.past || [];
+        if (radarFrames.length === 0) return;
+        const latestFrame = radarFrames[radarFrames.length - 1];
+        const ts = latestFrame.path; // e.g. "/v2/radar/1698364800"
+        rainviewerTimestampRef.current = ts;
+
+        if (!instance.getSource('rainviewer-radar')) {
+          instance.addSource('rainviewer-radar', {
+            type: 'raster',
+            tiles: [
+              `https://tilecache.rainviewer.com${ts}/256/{z}/{x}/{y}/6/1_1.png`
+            ],
+            tileSize: 256,
+            attribution: '© RainViewer',
+          });
+
+          // Insert BEFORE the simulated radar layer but AFTER the basemap layers
+          const beforeLayer = instance.getLayer('radar-heatmap-layer') ? 'radar-heatmap-layer' : undefined;
+          instance.addLayer({
+            id: 'rainviewer-radar-layer',
+            type: 'raster',
+            source: 'rainviewer-radar',
+            paint: {
+              'raster-opacity': 0.65,
+              'raster-fade-duration': 300,
+            },
+          }, beforeLayer);
+        }
+      } catch {
+        // RainViewer unavailable — degrade gracefully
+      }
+    };
+
+    instance.on('load', () => {
+      loadRainViewer();
+    });
+
+    // Auto-refresh RainViewer tiles every 5 minutes
+    const rainviewerInterval = setInterval(async () => {
+      if (!map.current) return;
+      try {
+        const resp = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const radarFrames = data?.radar?.past || [];
+        if (radarFrames.length === 0) return;
+        const latestFrame = radarFrames[radarFrames.length - 1];
+        const ts = latestFrame.path;
+        if (ts !== rainviewerTimestampRef.current) {
+          rainviewerTimestampRef.current = ts;
+          const src = map.current.getSource('rainviewer-radar') as maplibregl.RasterTileSource | undefined;
+          if (src) {
+            (src as any).setTiles([`https://tilecache.rainviewer.com${ts}/256/{z}/{x}/{y}/6/1_1.png`]);
+          }
+        }
+      } catch {}
+    }, 5 * 60 * 1000);
+
     // Fetch initial radar grid immediately on style ready
     const fetchInitialRadar = () => {
       const updateFromData = (radarData: unknown) => {
@@ -287,6 +361,7 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
     });
 
     return () => {
+      clearInterval(rainviewerInterval);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       Object.values(markersRef.current).forEach(m => m.remove());
       Object.values(assetMarkersRef.current).forEach(m => m.remove());
@@ -793,6 +868,19 @@ export function WeatherMap({ data, forecastHorizon, onStormSelect, selectedStorm
                   >
                     <Route className="h-3.5 w-3.5 text-indigo-400" />
                     <span>Tracks</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowRainViewerLayer((v) => !v)}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all border",
+                      showRainViewerLayer
+                        ? "bg-teal-500/20 text-teal-200 border-teal-500/40"
+                        : "bg-slate-800/40 text-slate-400 border-slate-800 hover:bg-slate-800"
+                    )}
+                  >
+                    <CloudRain className="h-3.5 w-3.5 text-teal-400" />
+                    <span>Live Radar</span>
                   </button>
                   <button
                     type="button"
